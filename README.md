@@ -11,3 +11,9 @@ Python, Pandas, Matplotlib, Scikit-learn
 - Analyzed customer repayment and financial data.
 - Built Logistic Regression and Random Forest models.
 - Evaluated results using precision, recall, F1-score, confusion matrix, and ROC-AUC.
+
+## Dataset
+
+Used the 'Default of Credit Card Clients' dataset from the UCI Machine Learning Repository.
+
+Dataset link: https://archive.ics.uci.edu/dataset/350/default+of+credit+card+clients
