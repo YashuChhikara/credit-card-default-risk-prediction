@@ -1,4 +1,32 @@
 import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.model_selection import (
+    train_test_split,
+    RandomizedSearchCV,
+    StratifiedKFold
+)
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    roc_auc_score,
+    precision_recall_curve,
+    ConfusionMatrixDisplay
+)
+
+from pathlib import Path
+import joblib
+
+
+# ============================================================
+# 1. LOAD DATA
+# ============================================================
 
 df = pd.read_csv("data/dataset.csv", header=1)
 
@@ -6,34 +34,62 @@ print("Rows and columns:", df.shape)
 print(df.head())
 
 
+# ============================================================
+# 2. BASIC CLEANING
+# ============================================================
+
 df = df.rename(
     columns={"default payment next month": "default_next_month"}
 )
 
+# ID is only an identifier and should not be used as a predictor
 df = df.drop(columns="ID")
 
-# Collapse undocumented/sentinel codes into the existing "other" category
-df["EDUCATION"] = df["EDUCATION"].replace({0: 4, 5: 4, 6: 4})  # 4 = "others"
-df["MARRIAGE"] = df["MARRIAGE"].replace({0: 3})                # 3 = "other"
+
+# Collapse undocumented codes into the existing "other" category
+df["EDUCATION"] = df["EDUCATION"].replace({
+    0: 4,
+    5: 4,
+    6: 4
+})  # 4 = "others"
+
+df["MARRIAGE"] = df["MARRIAGE"].replace({
+    0: 3
+})  # 3 = "other"
+
+
+# ============================================================
+# 3. BASIC DATA CHECKS
+# ============================================================
 
 print("\nDefault counts:")
 print(df["default_next_month"].value_counts())
 
 print("\nDefault proportions:")
-print(df["default_next_month"].value_counts(normalize=True))
+print(
+    df["default_next_month"]
+    .value_counts(normalize=True)
+    .round(4)
+)
 
 print("\nTotal missing values:", df.isna().sum().sum())
 print("Duplicate rows:", df.duplicated().sum())
 
-print(df.info())
+print("\nDataset information:")
+df.info()
+
+print("\nDescriptive statistics:")
 print(df.describe(include="all").T)
+
+print("\nNumber of unique values:")
 print(df.nunique().sort_values())
 
 
-categorical_columns = [
-    "SEX",
-    "EDUCATION",
-    "MARRIAGE",
+# ============================================================
+# 4. CATEGORICAL / DISCRETE EDA
+# ============================================================
+
+pay_features = [
     "PAY_0",
     "PAY_2",
     "PAY_3",
@@ -42,9 +98,22 @@ categorical_columns = [
     "PAY_6"
 ]
 
+nominal_features = [
+    "SEX",
+    "EDUCATION",
+    "MARRIAGE"
+]
+
+categorical_columns = nominal_features + pay_features
+
+
 for column in categorical_columns:
     print(f"\n{column} value counts:")
-    print(df[column].value_counts().sort_index())
+    print(
+        df[column]
+        .value_counts()
+        .sort_index()
+    )
 
 
 for column in categorical_columns:
@@ -54,10 +123,15 @@ for column in categorical_columns:
         df.groupby(column)["default_next_month"]
         .mean()
         .sort_values(ascending=False)
-        * 100
+        .mul(100)
     )
 
     print(default_rate.round(2))
+
+
+# ============================================================
+# 5. FINANCIAL VARIABLE EDA
+# ============================================================
 
 financial_columns = [
     "LIMIT_BAL",
@@ -76,7 +150,9 @@ financial_columns = [
     "PAY_AMT6"
 ]
 
+
 print("\nAverage financial values by default outcome:")
+
 print(
     df.groupby("default_next_month")[financial_columns]
     .mean()
@@ -85,7 +161,9 @@ print(
 )
 
 
-import matplotlib.pyplot as plt
+# ============================================================
+# 6. EXAMPLE EDA PLOT: PAY_0 DEFAULT RATE
+# ============================================================
 
 pay0_default_rate = (
     df.groupby("PAY_0")["default_next_month"]
@@ -93,17 +171,28 @@ pay0_default_rate = (
     .mul(100)
 )
 
-"""plt.figure(figsize=(10, 5))
-plt.bar(pay0_default_rate.index.astype(str), pay0_default_rate.values)
+# plt.figure(figsize=(10, 5))
+# plt.bar(
+#     pay0_default_rate.index.astype(str),
+#     pay0_default_rate.values
+# )
+# plt.title("Default Rate by Most Recent Repayment Status")
+# plt.xlabel("PAY_0 repayment status")
+# plt.ylabel("Default rate (%)")
+# plt.show()
 
-plt.title("Default Rate by Most Recent Repayment Status")
-plt.xlabel("PAY_0 repayment status")
-plt.ylabel("Default rate (%)")
-plt.show()"""
 
+# ============================================================
+# 7. CORRELATION FOR QUANTITATIVE VARIABLES
+# ============================================================
+
+# Pearson correlation is shown only for genuinely quantitative
+# variables rather than arbitrary category codes.
+
+correlation_columns = financial_columns + ["default_next_month"]
 
 numeric_correlation = (
-    df.select_dtypes(include="number")
+    df[correlation_columns]
     .corr()["default_next_month"]
     .sort_values(ascending=False)
 )
@@ -112,12 +201,21 @@ print("\nCorrelation with default:")
 print(numeric_correlation)
 
 
-from sklearn.model_selection import train_test_split
+# ============================================================
+# 8. DEFINE FEATURES AND TARGET
+# ============================================================
 
 X = df.drop(columns="default_next_month")
 y = df["default_next_month"]
 
-X_train, X_test, y_train, y_test = train_test_split(
+
+# ============================================================
+# 9. TRAIN / VALIDATION / TEST SPLIT
+# ============================================================
+
+# First hold out 20% as the final test set.
+
+X_train_val, X_test, y_train_val, y_test = train_test_split(
     X,
     y,
     test_size=0.20,
@@ -125,77 +223,165 @@ X_train, X_test, y_train, y_test = train_test_split(
     stratify=y
 )
 
-print("Training data shape:", X_train.shape)
+# Split the remaining 80% into:
+# 60% training and 20% validation overall.
+
+X_train, X_val, y_train, y_val = train_test_split(
+    X_train_val,
+    y_train_val,
+    test_size=0.25,
+    random_state=42,
+    stratify=y_train_val
+)
+
+print("\nTraining data shape:", X_train.shape)
+print("Validation data shape:", X_val.shape)
 print("Test data shape:", X_test.shape)
 
-print("\nTraining default rate:", y_train.mean().round(4))
-print("Test default rate:", y_test.mean().round(4))
+print("\nTraining default rate:", round(y_train.mean(), 4))
+print("Validation default rate:", round(y_val.mean(), 4))
+print("Test default rate:", round(y_test.mean(), 4))
 
 
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.linear_model import LogisticRegression
+# ============================================================
+# 10. LOGISTIC REGRESSION PREPROCESSING
+# ============================================================
 
-categorical_features = ["SEX", "EDUCATION", "MARRIAGE"]
+# PAY variables are discrete repayment-status codes.
+#
+# For logistic regression, they are one-hot encoded so that the
+# model does not impose a single linear log-odds effect across
+# codes such as -2, -1, 0, 1, 2, etc.
 
-numeric_features = [
-    column for column in X.columns
-    if column not in categorical_features
+logistic_categorical_features = nominal_features + pay_features
+
+logistic_numeric_features = [
+    column
+    for column in X.columns
+    if column not in logistic_categorical_features
 ]
 
-preprocessor = ColumnTransformer(
+
+logistic_preprocessor = ColumnTransformer(
     transformers=[
-        ("numeric", StandardScaler(), numeric_features),
-        ("categorical", OneHotEncoder(handle_unknown="ignore"), categorical_features)
+        (
+            "numeric",
+            StandardScaler(),
+            logistic_numeric_features
+        ),
+        (
+            "categorical",
+            OneHotEncoder(handle_unknown="ignore"),
+            logistic_categorical_features
+        )
     ]
 )
+
+
+# ============================================================
+# 11. LOGISTIC REGRESSION BASELINE
+# ============================================================
 
 logistic_model = Pipeline(
     steps=[
-        ("preprocessor", preprocessor),
-        ("model", LogisticRegression(max_iter=1000, class_weight="balanced"))
+        (
+            "preprocessor",
+            logistic_preprocessor
+        ),
+        (
+            "model",
+            LogisticRegression(
+                max_iter=1000,
+                class_weight="balanced"
+            )
+        )
     ]
 )
 
+
 logistic_model.fit(X_train, y_train)
 
-print("Logistic regression model trained successfully.")
+print("\nLogistic regression model trained successfully.")
 
 
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    roc_auc_score,
-    precision_recall_curve,
-    ConfusionMatrixDisplay
+# Validation performance
+logistic_val_pred = logistic_model.predict(X_val)
+
+logistic_val_prob = (
+    logistic_model
+    .predict_proba(X_val)[:, 1]
 )
 
-y_pred = logistic_model.predict(X_test)
-y_prob = logistic_model.predict_proba(X_test)[:, 1]
-
-print("Classification report:")
-print(classification_report(y_test, y_pred))
-
-print("ROC-AUC:", round(roc_auc_score(y_test, y_prob), 3))
-
-cm = confusion_matrix(y_test, y_pred)
-
-display = ConfusionMatrixDisplay(
-    confusion_matrix=cm,
-    display_labels=["No Default", "Default"]
+print("\nLogistic Regression validation report:")
+print(
+    classification_report(
+        y_val,
+        logistic_val_pred
+    )
 )
 
-"""display.plot()
-plt.title("Logistic Regression Confusion Matrix")
-plt.show()"""
+print(
+    "Logistic Regression validation ROC-AUC:",
+    round(
+        roc_auc_score(
+            y_val,
+            logistic_val_prob
+        ),
+        3
+    )
+)
 
 
-from sklearn.ensemble import RandomForestClassifier
+# ============================================================
+# 12. RANDOM FOREST PREPROCESSING
+# ============================================================
+
+# For the Random Forest:
+#
+# SEX, EDUCATION and MARRIAGE are nominal categories
+# and are one-hot encoded.
+#
+# PAY_* variables retain their ordered integer representation
+# because trees can exploit meaningful ordered splits such as
+# PAY_0 <= 0 versus PAY_0 > 0.
+#
+# Scaling is NOT required for tree-based models.
+
+rf_categorical_features = nominal_features
+
+rf_numeric_features = [
+    column
+    for column in X.columns
+    if column not in rf_categorical_features
+]
+
+
+rf_preprocessor = ColumnTransformer(
+    transformers=[
+        (
+            "numeric",
+            "passthrough",
+            rf_numeric_features
+        ),
+        (
+            "categorical",
+            OneHotEncoder(handle_unknown="ignore"),
+            rf_categorical_features
+        )
+    ]
+)
+
+
+# ============================================================
+# 13. BASELINE RANDOM FOREST
+# ============================================================
 
 random_forest_model = Pipeline(
     steps=[
-        ("preprocessor", preprocessor),
+        (
+            "preprocessor",
+            rf_preprocessor
+        ),
         (
             "model",
             RandomForestClassifier(
@@ -208,127 +394,364 @@ random_forest_model = Pipeline(
     ]
 )
 
+
 random_forest_model.fit(X_train, y_train)
 
-rf_pred = random_forest_model.predict(X_test)
-rf_prob = random_forest_model.predict_proba(X_test)[:, 1]
 
-print("Random Forest classification report:")
-print(classification_report(y_test, rf_pred))
+rf_val_pred = random_forest_model.predict(X_val)
 
-print("Random Forest ROC-AUC:", round(roc_auc_score(y_test, rf_prob), 3))
-
-
-feature_names = random_forest_model.named_steps[
-    "preprocessor"
-].get_feature_names_out()
-
-feature_importance = pd.DataFrame({
-    "feature": feature_names,
-    "importance": random_forest_model.named_steps["model"].feature_importances_
-}).sort_values("importance", ascending=False)
-
-print("\nTop 15 most important features:")
-print(feature_importance.head(15))
-
-top_features = feature_importance.head(15).sort_values("importance")
-
-"""plt.figure(figsize=(10, 6))
-plt.barh(top_features["feature"], top_features["importance"])
-plt.title("Top 15 Random Forest Default-Risk Drivers")
-plt.xlabel("Feature importance")
-plt.show()"""
+rf_val_prob = (
+    random_forest_model
+    .predict_proba(X_val)[:, 1]
+)
 
 
-from sklearn.model_selection import RandomizedSearchCV
+print("\nRandom Forest validation report:")
+print(
+    classification_report(
+        y_val,
+        rf_val_pred
+    )
+)
+
+print(
+    "Random Forest validation ROC-AUC:",
+    round(
+        roc_auc_score(
+            y_val,
+            rf_val_prob
+        ),
+        3
+    )
+)
+
+
+# ============================================================
+# 14. RANDOM FOREST HYPERPARAMETER TUNING
+# ============================================================
 
 parameter_options = {
     "model__n_estimators": [200, 300, 500],
-    "model__max_depth": [5, 10, 15, None],
-    "model__min_samples_split": [2, 5, 10],
-    "model__min_samples_leaf": [1, 2, 4],
-    "model__max_features": ["sqrt", "log2"]
+
+    "model__max_depth": [
+        5,
+        10,
+        15,
+        None
+    ],
+
+    "model__min_samples_split": [
+        2,
+        5,
+        10
+    ],
+
+    "model__min_samples_leaf": [
+        1,
+        2,
+        4
+    ],
+
+    "model__max_features": [
+        "sqrt",
+        "log2"
+    ]
 }
+
+
+# Stratified CV preserves the default / non-default proportion
+# in each fold.
+
+cv_strategy = StratifiedKFold(
+    n_splits=3,
+    shuffle=True,
+    random_state=42
+)
+
 
 rf_search = RandomizedSearchCV(
     estimator=random_forest_model,
     param_distributions=parameter_options,
     n_iter=10,
     scoring="roc_auc",
-    cv=3,
+    cv=cv_strategy,
     n_jobs=-1,
     random_state=42,
     verbose=1
 )
 
+
+# Hyperparameter search uses TRAINING DATA ONLY.
 rf_search.fit(X_train, y_train)
+
 
 best_random_forest = rf_search.best_estimator_
 
-print("Best settings:")
+
+print("\nBest Random Forest settings:")
 print(rf_search.best_params_)
 
 print("\nBest cross-validation ROC-AUC:")
-print(round(rf_search.best_score_, 3))
+print(
+    round(
+        rf_search.best_score_,
+        3
+    )
+)
 
 
-best_rf_prob = best_random_forest.predict_proba(X_test)[:, 1]
+# ============================================================
+# 15. VALIDATION PERFORMANCE OF TUNED RANDOM FOREST
+# ============================================================
 
-print("Tuned Random Forest ROC-AUC:")
-print(round(roc_auc_score(y_test, best_rf_prob), 3))
+best_rf_val_prob = (
+    best_random_forest
+    .predict_proba(X_val)[:, 1]
+)
+
+print("\nTuned Random Forest validation ROC-AUC:")
+
+print(
+    round(
+        roc_auc_score(
+            y_val,
+            best_rf_val_prob
+        ),
+        3
+    )
+)
 
 
+# ============================================================
+# 16. CHOOSE CLASSIFICATION THRESHOLD USING VALIDATION DATA
+# ============================================================
 
-precision, recall, pr_thresholds = precision_recall_curve(y_test, best_rf_prob)
+precision, recall, pr_thresholds = precision_recall_curve(
+    y_val,
+    best_rf_val_prob
+)
 
-f1_scores = 2 * precision[:-1] * recall[:-1] / (precision[:-1] + recall[:-1] + 1e-12)
+
+# precision_recall_curve returns one more precision/recall
+# value than threshold values, hence [:-1].
+
+f1_scores = (
+    2
+    * precision[:-1]
+    * recall[:-1]
+    /
+    (
+        precision[:-1]
+        + recall[:-1]
+        + 1e-12
+    )
+)
+
 
 best_f1_idx = f1_scores.argmax()
-print(f"\nBest F1 threshold: {pr_thresholds[best_f1_idx]:.3f}")
-print(f"  precision={precision[best_f1_idx]:.3f}  recall={recall[best_f1_idx]:.3f}  f1={f1_scores[best_f1_idx]:.3f}")
+
+final_threshold = pr_thresholds[best_f1_idx]
+
+
+print(
+    f"\nBest validation F1 threshold: "
+    f"{final_threshold:.3f}"
+)
+
+print(
+    f"precision={precision[best_f1_idx]:.3f}  "
+    f"recall={recall[best_f1_idx]:.3f}  "
+    f"f1={f1_scores[best_f1_idx]:.3f}"
+)
+
+
+# Display the precision-recall trade-off at several thresholds.
 
 print("\nthreshold  precision  recall     f1")
-for t in [0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]:
-    idx = (pr_thresholds >= t).argmax()
-    p, r = precision[idx], recall[idx]
-    f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0
-    print(f"{pr_thresholds[idx]:.2f}       {p:.3f}      {r:.3f}     {f1:.3f}")
+
+for t in [
+    0.20,
+    0.25,
+    0.30,
+    0.35,
+    0.40,
+    0.45,
+    0.50
+]:
+
+    # Find the stored PR threshold closest to t.
+    idx = abs(pr_thresholds - t).argmin()
+
+    p = precision[idx]
+    r = recall[idx]
+
+    f1 = (
+        2 * p * r / (p + r)
+        if (p + r) > 0
+        else 0
+    )
+
+    print(
+        f"{pr_thresholds[idx]:.2f}       "
+        f"{p:.3f}      "
+        f"{r:.3f}     "
+        f"{f1:.3f}"
+    )
 
 
-final_threshold = 0.424
+# ============================================================
+# 17. FINAL TEST-SET EVALUATION
+# ============================================================
 
-best_rf_pred = (best_rf_prob >= final_threshold).astype(int)
+# The test set has not been used for:
+# - model fitting
+# - hyperparameter tuning
+# - threshold selection
+#
+# It is now used for final evaluation only.
 
-print(f"\nTuned Random Forest report at threshold = {final_threshold}:")
-print(classification_report(y_test, best_rf_pred))
+best_rf_test_prob = (
+    best_random_forest
+    .predict_proba(X_test)[:, 1]
+)
 
-final_cm = confusion_matrix(y_test, best_rf_pred)
 
-ConfusionMatrixDisplay(
+best_rf_test_pred = (
+    best_rf_test_prob >= final_threshold
+).astype(int)
+
+
+print(
+    f"\nFinal Tuned Random Forest report "
+    f"at threshold = {final_threshold:.3f}:"
+)
+
+print(
+    classification_report(
+        y_test,
+        best_rf_test_pred
+    )
+)
+
+
+print(
+    "Final test ROC-AUC:",
+    round(
+        roc_auc_score(
+            y_test,
+            best_rf_test_prob
+        ),
+        3
+    )
+)
+
+
+# ============================================================
+# 18. FINAL CONFUSION MATRIX
+# ============================================================
+
+final_cm = confusion_matrix(
+    y_test,
+    best_rf_test_pred
+)
+
+
+display = ConfusionMatrixDisplay(
     confusion_matrix=final_cm,
-    display_labels=["No Default", "Default"]
-).plot()
+    display_labels=[
+        "No Default",
+        "Default"
+    ]
+)
 
-"""plt.title("Tuned Random Forest Confusion Matrix")
-plt.show()"""
+# display.plot()
+# plt.title("Tuned Random Forest Confusion Matrix")
+# plt.show()
 
 
-from pathlib import Path
-import joblib
+# ============================================================
+# 19. FEATURE IMPORTANCE FROM TUNED RANDOM FOREST
+# ============================================================
 
-Path("models").mkdir(exist_ok=True)
+feature_names = (
+    best_random_forest
+    .named_steps["preprocessor"]
+    .get_feature_names_out()
+)
+
+
+feature_importance = pd.DataFrame({
+    "feature": feature_names,
+
+    "importance":
+        best_random_forest
+        .named_steps["model"]
+        .feature_importances_
+})
+
+
+feature_importance = feature_importance.sort_values(
+    "importance",
+    ascending=False
+)
+
+
+print("\nTop 15 most important features:")
+print(
+    feature_importance
+    .head(15)
+)
+
+
+top_features = (
+    feature_importance
+    .head(15)
+    .sort_values("importance")
+)
+
+
+# plt.figure(figsize=(10, 6))
+# plt.barh(
+#     top_features["feature"],
+#     top_features["importance"]
+# )
+# plt.title("Top 15 Random Forest Default-Risk Drivers")
+# plt.xlabel("Feature importance")
+# plt.show()
+
+
+# ============================================================
+# 20. SAVE FINAL MODEL PACKAGE
+# ============================================================
+
+Path("models").mkdir(
+    exist_ok=True
+)
+
 
 model_package = {
     "model": best_random_forest,
-    "threshold": final_threshold,
+
+    "threshold": float(final_threshold),
+
     "feature_columns": list(X.columns),
+
     "model_name": "Tuned Random Forest"
 }
+
 
 joblib.dump(
     model_package,
     "models/credit_default_model.joblib"
 )
 
-print("\nModel saved to models/credit_default_model.joblib")
-print(f"Saved threshold: {model_package['threshold']}")
+
+print(
+    "\nModel saved to "
+    "models/credit_default_model.joblib"
+)
+
+print(
+    f"Saved threshold: "
+    f"{model_package['threshold']:.3f}"
+)
